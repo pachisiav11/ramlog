@@ -1,0 +1,31 @@
+# ramlog settings. Restart the logger after a change: `ramlog stop` then `ramlog start`.
+
+# Seconds between samples while you use the PC, and while it is idle.
+active_interval_s = 30
+idle_interval_s = 120
+
+# No keyboard or mouse input for this many seconds counts as idle.
+idle_after_s = 300
+
+# Apps smaller than this (MB of private working set) are folded into "(other)" in each sample.
+# Your own apps are always kept.
+min_app_mb = 5
+
+# Your own apps (exe names, without .exe). They get "own": true in the logs and their own report table.
+own_apps = [
+    "afk",
+    "openhistory-win",
+    "tessera",
+    "micropdf",
+    "micropdf-bridge",
+    "recto",
+    "syncdrop",
+    "redx",
+]
+
+# Extra helper exes. A helper's memory is counted under the app that started it.
+# Built in: msedgewebview2, conhost, openconsole, crashpad_handler, node, python, pythonw, py, uv,
+# cmd, powershell, pwsh, bash, sh, git.
+helpers = [
+    "llama-server", # AFK's local model server
+]
