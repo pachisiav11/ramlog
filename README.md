@@ -17,7 +17,7 @@ cargo build --release
 .\target\release\ramlog.exe install
 ```
 
-`install` copies `ramlog.exe` and `ramlogd.exe` to `bin\`, adds `ramlogd` to the `HKCU\...\Run` key so it starts at logon (it shows in Task Manager > Startup apps), and starts it. No admin rights needed. Rebuilding while the logger runs is fine, because the running copy lives in `bin\`. Run `install` again to update it.
+`install` copies `ramlog.exe` and `ramlogd.exe` to `bin\`, adds `bin\` to your user PATH so `ramlog` works in any new terminal, adds `ramlogd` to the `HKCU\...\Run` key so it starts at logon (it shows in Task Manager > Startup apps), and starts it. No admin rights needed. Rebuilding while the logger runs is fine, because the running copy lives in `bin\`. Run `install` again to update it.
 
 ## Commands
 
@@ -27,7 +27,7 @@ cargo build --release
 | `ramlog now [N]` | Take one sample now and print the top N apps. Does not write to the log. |
 | `ramlog report [DATE]` | Build and print the report for `today` (default), `yesterday`, or `YYYY-MM-DD`. |
 | `ramlog start` / `ramlog stop` | Start or stop the background logger. |
-| `ramlog install` / `ramlog uninstall` | Turn logon start on or off. Uninstall keeps logs and exes. |
+| `ramlog install` / `ramlog uninstall` | Turn logon start and the PATH entry on or off. Uninstall keeps logs and exes. |
 | `ramlog paths` | Show the project, config, log, and exe paths. |
 
 The logger itself (`ramlogd.exe`) has no window and no tray icon. Find it in Task Manager under Details.

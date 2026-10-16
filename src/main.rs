@@ -18,8 +18,8 @@ Usage:
   ramlog report [DATE]   Write and print the report for DATE: today (default), yesterday, or YYYY-MM-DD
   ramlog start           Start the background logger
   ramlog stop            Stop the background logger
-  ramlog install         Copy the exes to bin\\, start the logger at logon, and start it now
-  ramlog uninstall       Stop the logger and remove it from logon (files stay)
+  ramlog install         Copy the exes to bin\\, add bin\\ to PATH, start the logger at logon and now
+  ramlog uninstall       Stop the logger, remove it from logon and PATH (files stay)
   ramlog paths           Show the project, config, log, and exe paths
 ";
 
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
         Some("start") => start(&root),
         Some("stop") => stop(),
         Some("install") => install(&root),
-        Some("uninstall") => uninstall(),
+        Some("uninstall") => uninstall(&root),
         Some("paths") => paths(&root, &logs),
         Some(other) => Err(format!("unknown command: {other}\n\n{USAGE}")),
     };
@@ -79,6 +79,12 @@ fn status(root: &Path, logs: &Path) -> Result<(), String> {
     match win::run_key_get() {
         Some(cmd) => println!("Logon start: on ({cmd})"),
         None => println!("Logon start: off. Turn it on with `ramlog install`."),
+    }
+    let bin = root.join("bin");
+    if win::user_path_has(&bin.display().to_string()) {
+        println!("PATH: on (`ramlog` works in any new terminal)");
+    } else {
+        println!("PATH: off. `ramlog install` adds {}", bin.display());
     }
     if let Err(e) = Config::load(root) {
         println!("Config: ERROR {e}");
@@ -249,13 +255,26 @@ fn install(root: &Path) -> Result<(), String> {
     let command = format!("\"{}\"", bin.join("ramlogd.exe").display());
     win::run_key_set(&command).map_err(|e| format!("cannot set the logon entry: {e}"))?;
     println!("Logon start: on ({command})");
+    let bin_dir = bin.display().to_string();
+    match win::user_path_add(&bin_dir) {
+        Ok(true) => println!("Added {bin_dir} to your user PATH. New terminals can run `ramlog` from any folder."),
+        Ok(false) => println!("PATH already has {bin_dir}"),
+        Err(e) => println!("Could not add {bin_dir} to your user PATH: {e}"),
+    }
     start(root)
 }
 
-fn uninstall() -> Result<(), String> {
+fn uninstall(root: &Path) -> Result<(), String> {
     stop()?;
     win::run_key_delete().map_err(|e| format!("cannot remove the logon entry: {e}"))?;
-    println!("Logon start: off. Logs and exes are kept.");
+    println!("Logon start: off.");
+    let bin_dir = root.join("bin").display().to_string();
+    match win::user_path_remove(&bin_dir) {
+        Ok(true) => println!("Removed {bin_dir} from your user PATH."),
+        Ok(false) => {}
+        Err(e) => println!("Could not remove {bin_dir} from your user PATH: {e}"),
+    }
+    println!("Logs and exes are kept.");
     Ok(())
 }
 
