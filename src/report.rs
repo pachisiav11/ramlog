@@ -19,6 +19,11 @@ struct AppStats {
     secs: u64,
     mem_secs: u64,
     n_secs: u64,
+    /// Time-weighted sums over schema 2 samples only.
+    v2_secs: u64,
+    v2_mem_secs: u64,
+    shared_secs: u64,
+    gpu_secs: u64,
     peak: u32,
     peak_ts: String,
     mems: Vec<u32>,
@@ -29,6 +34,18 @@ struct Moment {
     ts: String,
     fg: String,
     top: String,
+}
+
+#[derive(Default)]
+struct Split {
+    secs: u64,
+    used: u64,
+    apps: u64,
+    compressed: u64,
+    kernel: u64,
+    modified: u64,
+    gpu: u64,
+    gpu_secs: u64,
 }
 
 #[derive(Default)]
@@ -47,6 +64,8 @@ struct Day {
     pagefile_peak: u32,
     compressed_peak: u32,
     compressed_secs: u64,
+    /// Time-weighted sums over samples that have the schema 2 fields.
+    split: Split,
     events: BTreeMap<String, u32>,
     gap_secs: u64,
     apps: HashMap<String, AppStats>,
@@ -78,6 +97,21 @@ impl Day {
         self.pagefile_peak = self.pagefile_peak.max(sys.pagefile_mb);
         self.compressed_peak = self.compressed_peak.max(sys.compressed_mb);
         self.compressed_secs += sys.compressed_mb as u64 * w;
+        // Schema 1 samples have no memory lists; standby + free is never 0 on a running PC.
+        let v2 = sys.standby_mb + sys.free_mb > 0;
+        if v2 {
+            let sp = &mut self.split;
+            sp.secs += w;
+            sp.used += sys.total_mb.saturating_sub(sys.avail_mb) as u64 * w;
+            sp.apps += s.apps.iter().map(|a| a.mem_mb as u64).sum::<u64>() * w;
+            sp.compressed += sys.compressed_mb as u64 * w;
+            sp.kernel += (sys.kernel_paged_mb + sys.kernel_nonpaged_mb) as u64 * w;
+            sp.modified += sys.modified_mb as u64 * w;
+            if let Some(g) = sys.gpu_shared_mb {
+                sp.gpu += g as u64 * w;
+                sp.gpu_secs += w;
+            }
+        }
 
         let fg = s.fg.clone().unwrap_or_default();
         if s.active {
@@ -92,6 +126,12 @@ impl Day {
             st.secs += w;
             st.mem_secs += a.mem_mb as u64 * w;
             st.n_secs += a.n as u64 * w;
+            if v2 {
+                st.v2_secs += w;
+                st.v2_mem_secs += a.mem_mb as u64 * w;
+                st.shared_secs += a.shared_mb as u64 * w;
+                st.gpu_secs += a.gpu_mb as u64 * w;
+            }
             if a.mem_mb > st.peak {
                 st.peak = a.mem_mb;
                 st.peak_ts = s.ts.clone();
@@ -239,6 +279,61 @@ fn render(d: &Day, date: &str, file: &str) -> String {
 
     let mut ranked: Vec<(&String, &AppStats)> = d.apps.iter().collect();
     ranked.sort_by(|a, b| b.1.mem_secs.cmp(&a.1.mem_secs).then_with(|| a.0.cmp(b.0)));
+
+    let sp = &d.split;
+    if sp.secs > 0 {
+        let avg = |v: u64| v / sp.secs;
+        let used = avg(sp.used);
+        let known = avg(sp.apps) + avg(sp.compressed) + avg(sp.kernel) + avg(sp.modified);
+        w!("\n## Where the used RAM goes\n");
+        w!(
+            "Averages over the {} covered by samples with these fields (schema 2). \"Outside apps\" \
+             is what is left: program code and other shared pages, mapped files, page tables, \
+             kernel stacks, driver-locked memory, and the resident system file cache. The kernel \
+             pool row is committed pool, so part of it can be in the page file; the last row is \
+             an estimate.\n",
+            hours(sp.secs)
+        );
+        w!("| Part | Avg | Share of used |\n|---|---:|---:|");
+        let row = |o: &mut String, name: &str, mb: u64| {
+            let _ = writeln!(o, "| {name} | {} | {}% |", gb(mb), pct(mb, used));
+        };
+        row(&mut o, "Used RAM (total - available)", used);
+        row(&mut o, "Apps, private memory (`apps[].mem_mb`)", avg(sp.apps));
+        row(&mut o, "Compressed memory", avg(sp.compressed));
+        row(&mut o, "Kernel pools, paged + nonpaged", avg(sp.kernel));
+        row(&mut o, "Modified pages, waiting to be written", avg(sp.modified));
+        row(&mut o, "Outside apps (estimate)", used.saturating_sub(known));
+        if sp.gpu_secs > 0 {
+            w!(
+                "\nGPU memory taken from system RAM (Task Manager \"shared GPU memory\"): \
+                 average {}. It can overlap with the rows above.",
+                gb(sp.gpu / sp.gpu_secs)
+            );
+        }
+
+        w!("\n## Shared and GPU memory by app\n");
+        w!(
+            "\"Shared\" is the app's working set minus its private memory: loaded program code \
+             and memory shared with other processes. Each app counts the shared pages it uses, \
+             so the column does not add up to a total. Top 10 by average shared memory, over \
+             the time the app ran in schema 2 samples.\n"
+        );
+        let mut by_shared: Vec<_> =
+            ranked.iter().filter(|(n, s)| n.as_str() != "(other)" && s.v2_secs > 0).collect();
+        by_shared.sort_by_key(|(_, s)| std::cmp::Reverse(s.shared_secs / s.v2_secs));
+        w!("| App | Private MB | Shared MB | GPU MB | Running |\n|---|---:|---:|---:|---:|");
+        for (name, st) in by_shared.into_iter().take(10) {
+            let t = st.v2_secs;
+            w!(
+                "| {name} | {} | {} | {} | {} |",
+                st.v2_mem_secs / t,
+                st.shared_secs / t,
+                st.gpu_secs / t,
+                hours(t)
+            );
+        }
+    }
 
     w!("\n## Top apps by average memory\n");
     w!("\"Avg (day)\" spreads the app's memory over all covered time, so it shows the total load. \"Avg (running)\" counts only the time the app ran.\n");

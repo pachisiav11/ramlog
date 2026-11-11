@@ -1,6 +1,6 @@
 [package]
 name = "ramlog"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Low-overhead Windows RAM logger: per-app memory, system totals, focus and power events as daily JSONL, plus daily Markdown reports."
 license = "MIT"
@@ -17,6 +17,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
     "Win32_System_Power",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",

@@ -49,6 +49,14 @@ pub struct Sys {
     pub cache_mb: u32,
     pub kernel_paged_mb: u32,
     pub kernel_nonpaged_mb: u32,
+    #[serde(default)]
+    pub modified_mb: u32,
+    #[serde(default)]
+    pub standby_mb: u32,
+    #[serde(default)]
+    pub free_mb: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_shared_mb: Option<u32>,
     pub procs: u32,
 }
 
@@ -60,6 +68,10 @@ pub struct App {
     pub n: u32,
     pub mem_mb: u32,
     pub commit_mb: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shared_mb: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gpu_mb: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -87,6 +99,10 @@ impl Event {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Local time with UTC offset, for example 2026-10-16T22:15:30+05:30.

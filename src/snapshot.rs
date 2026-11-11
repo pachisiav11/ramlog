@@ -6,6 +6,10 @@ use windows_sys::Wdk::System::SystemInformation::{
     NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS, SystemProcessInformation,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
+use windows_sys::Win32::System::Performance::{
+    PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA, PDH_RAW_COUNTER_ITEM_W, PdhAddEnglishCounterW,
+    PdhCollectQueryData, PdhGetRawCounterArrayW, PdhOpenQueryW,
+};
 use windows_sys::Win32::System::ProcessStatus::{K32GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -15,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
 const SYSTEM_PAGEFILE_INFORMATION: SYSTEM_INFORMATION_CLASS = 18;
+const SYSTEM_MEMORY_LIST_INFORMATION: SYSTEM_INFORMATION_CLASS = 80;
 
 /// Processes that start other apps. A group started by one of these gets no "via".
 const LAUNCHERS: &[&str] = &[
@@ -82,9 +87,97 @@ pub struct Proc {
     pub ws: u64,
 }
 
+/// SYSTEM_MEMORY_LIST_INFORMATION (x64). Counts are pages. Works without admin rights.
+#[repr(C)]
+#[derive(Default)]
+struct MemoryLists {
+    zero: usize,
+    free: usize,
+    modified: usize,
+    modified_no_write: usize,
+    bad: usize,
+    standby: [usize; 8],
+    repurposed: [usize; 8],
+    modified_pagefile: usize,
+}
+
+/// GPU memory taken from system RAM ("Shared Usage" counters, as in Task Manager).
+struct Gpu {
+    query: PDH_HQUERY,
+    per_process: PDH_HCOUNTER,
+    adapters: PDH_HCOUNTER,
+    buf: Vec<u64>,
+}
+
+impl Gpu {
+    fn open() -> Option<Gpu> {
+        let mut query: PDH_HQUERY = std::ptr::null_mut();
+        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) } != 0 {
+            return None;
+        }
+        let add = |path: &str| {
+            let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+            let mut c: PDH_HCOUNTER = std::ptr::null_mut();
+            (unsafe { PdhAddEnglishCounterW(query, wide.as_ptr(), 0, &mut c) } == 0).then_some(c)
+        };
+        let per_process = add(r"\GPU Process Memory(*)\Shared Usage")?;
+        let adapters = add(r"\GPU Adapter Memory(*)\Shared Usage")?;
+        Some(Gpu { query, per_process, adapters, buf: vec![0; 4096] })
+    }
+
+    /// Calls `f(instance name, bytes)` for each instance of `counter`.
+    fn each(&mut self, counter: PDH_HCOUNTER, mut f: impl FnMut(&[u16], u64)) {
+        loop {
+            let mut size = (self.buf.len() * 8) as u32;
+            let mut count = 0u32;
+            let items = self.buf.as_mut_ptr().cast::<PDH_RAW_COUNTER_ITEM_W>();
+            let status = unsafe { PdhGetRawCounterArrayW(counter, &mut size, &mut count, items) };
+            if status == PDH_MORE_DATA {
+                self.buf.resize(size as usize / 8 + 1024, 0);
+                continue;
+            }
+            if status != 0 {
+                return;
+            }
+            for k in 0..count as usize {
+                // SAFETY: PDH wrote `count` items into buf; names point into the same buffer.
+                let item = unsafe { &*items.add(k) };
+                let name = unsafe {
+                    let mut n = 0;
+                    while *item.szName.add(n) != 0 {
+                        n += 1;
+                    }
+                    std::slice::from_raw_parts(item.szName, n)
+                };
+                f(name, item.RawValue.FirstValue.max(0) as u64);
+            }
+            return;
+        }
+    }
+
+    /// Total shared GPU memory and bytes per PID.
+    fn read(&mut self) -> Option<(u64, HashMap<u32, u64>)> {
+        if unsafe { PdhCollectQueryData(self.query) } != 0 {
+            return None;
+        }
+        let mut total = 0u64;
+        self.each(self.adapters, |_, v| total += v);
+        let mut by_pid: HashMap<u32, u64> = HashMap::new();
+        self.each(self.per_process, |name, v| {
+            // Instance names look like "pid_5916_luid_0x00000000_0x00017ed1_phys_0".
+            let name = String::from_utf16_lossy(name);
+            if let Some(pid) = name.strip_prefix("pid_").and_then(|r| r.split('_').next()?.parse().ok()) {
+                *by_pid.entry(pid).or_default() += v;
+            }
+        });
+        Some((total, by_pid))
+    }
+}
+
 pub struct Snapshotter {
     buf: Vec<u64>,
     small: Vec<u64>,
+    gpu: Option<Gpu>,
 }
 
 impl Default for Snapshotter {
@@ -95,7 +188,7 @@ impl Default for Snapshotter {
 
 impl Snapshotter {
     pub fn new() -> Self {
-        Snapshotter { buf: vec![0; 64 * 1024], small: vec![0; 512] }
+        Snapshotter { buf: vec![0; 64 * 1024], small: vec![0; 512], gpu: Gpu::open() }
     }
 
     pub fn processes(&mut self) -> Vec<Proc> {
@@ -157,12 +250,28 @@ impl Snapshotter {
         pages
     }
 
-    pub fn system(&mut self, procs: &[Proc]) -> Sys {
+    fn memory_lists(&mut self) -> MemoryLists {
+        let mut m = MemoryLists::default();
+        let size = size_of::<MemoryLists>() as u32;
+        let mut needed = 0u32;
+        unsafe {
+            NtQuerySystemInformation(
+                SYSTEM_MEMORY_LIST_INFORMATION,
+                (&mut m as *mut MemoryLists).cast(),
+                size,
+                &mut needed,
+            )
+        };
+        m
+    }
+
+    pub fn system(&mut self, procs: &[Proc], gpu_total: Option<u64>) -> Sys {
         let pi = performance_info();
         let page = pi.PageSize as u64;
         let mb = |pages: usize| (pages as u64 * page / MB) as u32;
         let total = mb(pi.PhysicalTotal);
         let avail = mb(pi.PhysicalAvailable);
+        let lists = self.memory_lists();
         Sys {
             total_mb: total,
             avail_mb: avail,
@@ -174,6 +283,10 @@ impl Snapshotter {
             cache_mb: mb(pi.SystemCache),
             kernel_paged_mb: mb(pi.KernelPaged),
             kernel_nonpaged_mb: mb(pi.KernelNonpaged),
+            modified_mb: mb(lists.modified + lists.modified_no_write),
+            standby_mb: mb(lists.standby.iter().sum()),
+            free_mb: mb(lists.zero + lists.free),
+            gpu_shared_mb: gpu_total.map(to_mb),
             procs: procs.len() as u32,
         }
     }
@@ -188,8 +301,10 @@ impl Snapshotter {
             Some(&i) => (Some(procs[tops[i]].name.clone()), Some(procs[i].name.clone())),
             None => (None, None),
         };
-        let sys = self.system(&procs);
-        let apps = group_apps(&procs, &by_pid, &tops, cfg);
+        let gpu = self.gpu.as_mut().and_then(Gpu::read);
+        let sys = self.system(&procs, gpu.as_ref().map(|g| g.0));
+        let gpu_by_pid = gpu.map(|g| g.1).unwrap_or_default();
+        let apps = group_apps(&procs, &by_pid, &tops, &gpu_by_pid, cfg);
         Sample {
             ts,
             int_s: if active { cfg.active_interval_s } else { cfg.idle_interval_s },
@@ -274,6 +389,8 @@ struct Acc {
     n: u32,
     mem: u64,
     commit: u64,
+    shared: u64,
+    gpu: u64,
     parts: BTreeMap<String, u64>,
     via: Option<String>,
 }
@@ -282,6 +399,7 @@ fn group_apps(
     procs: &[Proc],
     by_pid: &HashMap<u32, usize>,
     tops: &[usize],
+    gpu_by_pid: &HashMap<u32, u64>,
     cfg: &Config,
 ) -> Vec<App> {
     let mut groups: HashMap<&str, Acc> = HashMap::new();
@@ -294,6 +412,8 @@ fn group_apps(
         acc.n += 1;
         acc.mem += p.mem;
         acc.commit += p.commit;
+        acc.shared += p.ws.saturating_sub(p.mem);
+        acc.gpu += gpu_by_pid.get(&p.pid).copied().unwrap_or(0);
         *acc.parts.entry(p.name.clone()).or_default() += p.mem;
         if tops[i] == i && acc.via.is_none() {
             if let Some(j) = parent(procs, by_pid, i) {
@@ -314,6 +434,8 @@ fn group_apps(
             other.n += acc.n;
             other.mem += acc.mem;
             other.commit += acc.commit;
+            other.shared += acc.shared;
+            other.gpu += acc.gpu;
             continue;
         }
         let mut parts: BTreeMap<String, u32> =
@@ -327,6 +449,8 @@ fn group_apps(
             n: acc.n,
             mem_mb: to_mb(acc.mem),
             commit_mb: to_mb(acc.commit),
+            shared_mb: to_mb(acc.shared),
+            gpu_mb: to_mb(acc.gpu),
             via: acc.via,
             parts,
         });
@@ -339,6 +463,8 @@ fn group_apps(
             n: other.n,
             mem_mb: to_mb(other.mem),
             commit_mb: to_mb(other.commit),
+            shared_mb: to_mb(other.shared),
+            gpu_mb: to_mb(other.gpu),
             via: None,
             parts: BTreeMap::new(),
         });

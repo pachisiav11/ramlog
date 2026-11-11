@@ -147,15 +147,30 @@ fn now(cfg: &Config, n: Option<&String>) -> Result<(), String> {
         gb(sys.cache_mb)
     );
     println!(
+        "Kernel pools {} paged, {} nonpaged; modified {}, standby {}, free {}, GPU shared {}",
+        gb(sys.kernel_paged_mb),
+        gb(sys.kernel_nonpaged_mb),
+        gb(sys.modified_mb),
+        gb(sys.standby_mb),
+        gb(sys.free_mb),
+        sys.gpu_shared_mb.map_or("-".to_string(), gb)
+    );
+    println!(
         "Focus: {}   Idle: {} s   Processes: {}\n",
         s.fg.as_deref().unwrap_or("-"),
         s.idle_s,
         sys.procs
     );
-    println!("{:<40} {:>5} {:>10} {:>10}", "App", "Procs", "Memory MB", "Commit MB");
+    println!(
+        "{:<40} {:>5} {:>10} {:>10} {:>10} {:>7}",
+        "App", "Procs", "Memory MB", "Commit MB", "Shared MB", "GPU MB"
+    );
     for a in s.apps.iter().take(top) {
         let name = if a.own { format!("{} (own)", a.app) } else { a.app.clone() };
-        println!("{name:<40} {:>5} {:>10} {:>10}", a.n, a.mem_mb, a.commit_mb);
+        println!(
+            "{name:<40} {:>5} {:>10} {:>10} {:>10} {:>7}",
+            a.n, a.mem_mb, a.commit_mb, a.shared_mb, a.gpu_mb
+        );
     }
     Ok(())
 }

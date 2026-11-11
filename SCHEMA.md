@@ -1,4 +1,4 @@
-# ramlog log schema (version 1)
+# ramlog log schema (version 2)
 
 ramlog writes one JSON Lines file per local day: `YYYY-MM-DD.jsonl`. Every line is one JSON object. The `t` field says which kind of record it is: `header`, `sample`, or `event`. Lines are in time order. A daily summary, `YYYY-MM-DD.report.md`, is written next to each finished day.
 
@@ -10,7 +10,7 @@ The first line of every file.
 
 | Field | Meaning |
 |---|---|
-| `schema` | Schema version of this file (1). |
+| `schema` | Schema version of this file (2). Version 1 files lack the fields marked "v2" below; readers should treat them as 0 or missing. |
 | `tool`, `version` | `ramlog` and its version. |
 | `host` | Computer name. |
 | `date` | The day this file covers. |
@@ -44,7 +44,11 @@ One snapshot of memory use.
 | `pagefile_mb` | Page file space in use. |
 | `compressed_mb` | RAM held by the Memory Compression process (compressed pages). |
 | `cache_mb` | System file cache. |
-| `kernel_paged_mb`, `kernel_nonpaged_mb` | Kernel pools. |
+| `kernel_paged_mb`, `kernel_nonpaged_mb` | Kernel pools (committed size; paged pool can be partly in the page file). |
+| `modified_mb` | v2. Modified pages: changed memory that Windows must write to the page file or to its file before it can reuse the RAM. Counts as used, not available. A high value means Windows is short of RAM. |
+| `standby_mb` | v2. Standby list: cached pages that Windows can reuse at once. Part of `avail_mb`. |
+| `free_mb` | v2. Free and zeroed pages. `standby_mb + free_mb` is about `avail_mb`. |
+| `gpu_shared_mb` | v2. GPU memory taken from system RAM, summed over all GPUs (Task Manager "Shared GPU memory"). On a laptop with integrated graphics this is the whole GPU memory. Missing when the GPU counters are not available. |
 | `procs` | Number of processes. |
 
 ### apps[]
@@ -56,6 +60,8 @@ One snapshot of memory use.
 | `n` | Number of processes in the group. |
 | `mem_mb` | Sum of private working sets: the RAM only this group uses. Matches the Task Manager "Memory" column. |
 | `commit_mb` | Sum of private committed memory (in RAM or in the page file). |
+| `shared_mb` | v2. Sum of (working set - private working set) over the group: loaded program code (exe and DLL pages) and memory shared with other processes. A page shared by two apps counts in both, so this does not add up across apps. Missing when 0. |
+| `gpu_mb` | v2. Shared GPU memory (system RAM) the group's processes use. Missing when 0. |
 | `via` | The process that started this group, when it is not a normal launcher (Explorer, services, svchost and similar). Example: a native messaging host started by Chrome has `"via": "chrome"`. |
 | `parts` | When a group has more than one exe: memory per exe (`mem_mb`), for exes of 1 MB or more. |
 
@@ -84,3 +90,4 @@ Every process belongs to the group of its own exe name, except helper processes.
 - Low `avail_mb` together with high `pagefile_mb` or `compressed_mb` is real memory pressure.
 - For leaks, follow one app's `mem_mb` across consecutive samples while `fg` and `active` stay the same.
 - A `(other)` entry holds many small processes; its size is the sum of them.
+- Used RAM (`total_mb - avail_mb`) is much more than the sum of `apps[].mem_mb`. The rest is roughly `compressed_mb`, the kernel pools, `modified_mb`, and memory that belongs to no single app: shared program code (see `shared_mb`), mapped files, page tables, kernel stacks and driver-locked memory. Only an admin tool such as Sysinternals RAMMap can split that last part exactly.

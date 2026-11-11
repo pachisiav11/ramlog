@@ -2,9 +2,10 @@
 
 A tiny background logger that records how much RAM each app on a Windows PC uses, all day, every day. The output is plain JSON Lines, made to be handed to an AI agent (or a script) for analysis: which apps hold the most memory, when the PC runs out, what grows over time, and what sits in memory without being used.
 
-- **Small:** about 2 MB of RAM and one system call per sample. Written in Rust, no runtime.
+- **Small:** about 6 MB of RAM (about 4 MB of it for the Windows GPU counters) and a few system calls per sample. Written in Rust, no runtime.
 - **Adaptive:** a sample every 30 s while you use the PC, every 2 min while it is idle.
 - **Per app, not per process:** helper processes (WebView2, Node, Python, consoles, shells) count under the app that started them, so Teams' WebView2 shows as `ms-teams` and MCP servers started by Claude show as `claude`.
+- **Beyond apps:** memory lists (modified, standby, free), GPU memory taken from system RAM, and per-app shared memory (program code), so a report can show where the RAM goes that no single app owns.
 - **Context:** the foreground app, idle time, and sleep, wake, lock, screen and logon events.
 - **Daily report:** at the end of each day, a Markdown summary is written next to the raw log.
 
